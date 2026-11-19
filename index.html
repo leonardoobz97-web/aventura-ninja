@@ -1,1 +1,2065 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>Kage Runner — Prévia Jogável</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;900&display=swap" rel="stylesheet" />
+  <style>
+    body {
+      font-family: 'Inter', system-ui, -apple-system, sans-serif;
+      background-color: #09090b;
+      color: #f4f4f5;
+      overflow-x: hidden;
+      user-select: none;
+    }
+    canvas {
+      display: block;
+      width: 100%;
+      height: 100%;
+      touch-action: none;
+      image-rendering: pixelated;
+      image-rendering: crisp-edges;
+    }
+  </style>
+</head>
+<body class="bg-zinc-950 text-zinc-100 antialiased">
+  <div id="root"></div>
 
+  <script type="text/babel">
+    const { useState, useEffect, useRef, useCallback } = React;
+
+    // ============================================================================
+    // SISTEMA DE ÁUDIO SINTETIZADO (WEB AUDIO API - SEM URLS EXTERNAS)
+    // ============================================================================
+    class SoundEngine {
+      constructor() {
+        this.ctx = null;
+        this.muted = false;
+        this.bgmInterval = null;
+      }
+
+      init() {
+        if (!this.ctx) {
+          const AudioCtx = window.AudioContext || window.webkitAudioContext;
+          if (AudioCtx) {
+            this.ctx = new AudioCtx();
+          }
+        }
+        if (this.ctx && this.ctx.state === "suspended") {
+          this.ctx.resume().catch(() => {});
+        }
+      }
+
+      playTone(freq, type = "square", duration = 0.12, gainVal = 0.08, endFreq = null) {
+        if (this.muted) return;
+        this.init();
+        if (!this.ctx) return;
+
+        const now = this.ctx.currentTime;
+        const osc = this.ctx.createOscillator();
+        const gain = this.ctx.createGain();
+        osc.type = type;
+        osc.frequency.setValueAtTime(freq, now);
+        if (endFreq) {
+          osc.frequency.exponentialRampToValueAtTime(endFreq, now + duration);
+        }
+
+        gain.gain.setValueAtTime(gainVal, now);
+        gain.gain.exponentialRampToValueAtTime(0.0001, now + duration);
+
+        osc.connect(gain);
+        gain.connect(this.ctx.destination);
+        osc.start(now);
+        osc.stop(now + duration);
+      }
+
+      jump() {
+        this.playTone(260, "square", 0.14, 0.07, 560);
+      }
+
+      bowShoot() {
+        this.playTone(460, "triangle", 0.11, 0.08, 190);
+      }
+
+      shuriken() {
+        this.playTone(920, "sawtooth", 0.09, 0.06, 380);
+      }
+
+      hitEnemy() {
+        this.playTone(180, "square", 0.1, 0.09, 90);
+      }
+
+      playerHurt() {
+        this.playTone(150, "sawtooth", 0.24, 0.11, 55);
+      }
+
+      chestOpen() {
+        this.playTone(523.25, "triangle", 0.1, 0.08);
+        setTimeout(() => this.playTone(659.25, "triangle", 0.1, 0.08), 80);
+        setTimeout(() => this.playTone(783.99, "triangle", 0.18, 0.09), 160);
+      }
+
+      doorUnlock() {
+        this.playTone(440, "sine", 0.12, 0.08);
+        setTimeout(() => this.playTone(587.33, "sine", 0.12, 0.08), 90);
+        setTimeout(() => this.playTone(880, "sine", 0.25, 0.1), 180);
+      }
+
+      stageClear() {
+        const notes = [523.25, 659.25, 783.99, 1046.5];
+        notes.forEach((n, i) => {
+          setTimeout(() => this.playTone(n, "triangle", 0.2, 0.09), i * 110);
+        });
+      }
+
+      startBgm() {
+        this.stopBgm();
+        const bassNotes = [110, 110, 130.81, 146.83, 110, 110, 164.81, 146.83];
+        let step = 0;
+        this.bgmInterval = setInterval(() => {
+          if (!this.muted && this.ctx && this.ctx.state === "running") {
+            const note = bassNotes[step % bassNotes.length];
+            this.playTone(note, "triangle", 0.18, 0.025);
+            step++;
+          }
+        }, 320);
+      }
+
+      stopBgm() {
+        if (this.bgmInterval) {
+          clearInterval(this.bgmInterval);
+          this.bgmInterval = null;
+        }
+      }
+    }
+
+    const sound = new SoundEngine();
+
+    // ============================================================================
+    // DEFINIÇÃO DAS 3 FASES (PLATAFORMAS, ARMADILHAS, INIMIGOS, BAÚS E PORTA)
+    // ============================================================================
+    const STAGES = [
+      {
+        id: 1,
+        name: "Muralha do Crepúsculo",
+        worldWidth: 2500,
+        groundY: 410,
+        platforms: [
+          { x: 280, y: 330, w: 120, h: 18 },
+          { x: 470, y: 270, w: 130, h: 18 },
+          { x: 680, y: 220, w: 130, h: 18 },
+          { x: 920, y: 310, w: 180, h: 18 },
+          { x: 1220, y: 260, w: 150, h: 18 },
+          { x: 1520, y: 300, w: 160, h: 18 },
+          { x: 1800, y: 240, w: 160, h: 18 }
+        ],
+        traps: [
+          { type: "lava", x: 560, y: 410, w: 150, h: 40 },
+          { type: "spikes", x: 1030, y: 394, w: 70, h: 16 },
+          { type: "lava", x: 1340, y: 410, w: 160, h: 40 },
+          { type: "saw", x: 1660, y: 394, r: 16, minX: 1580, maxX: 1750, dir: 1, spin: 0 }
+        ],
+        enemies: [
+          { type: "skeleton", x: 430, y: 362, minX: 330, maxX: 520, hp: 60 },
+          { type: "archer", x: 745, y: 172, minX: 690, maxX: 790, hp: 50 },
+          { type: "bat", x: 980, y: 185, baseY: 185, minX: 880, maxX: 1120, hp: 35 },
+          { type: "skeleton", x: 1240, y: 362, minX: 1130, maxX: 1310, hp: 60 },
+          { type: "archer", x: 1870, y: 192, minX: 1810, maxX: 1940, hp: 55 },
+          { type: "bat", x: 2040, y: 210, baseY: 210, minX: 1930, maxX: 2180, hp: 40 }
+        ],
+        chests: [
+          { x: 495, y: 238, cash: 50, item: { id: "potion", name: "Poção Carmesim", icon: "🧪", desc: "Restaura +45 HP" } },
+          { x: 1265, y: 228, cash: 75, item: { id: "gold_scroll", name: "Pergaminho Dourado", icon: "📜", desc: "+250 Pontos" } },
+          { x: 1855, y: 208, cash: 100, item: { id: "shuriken_pack", name: "Aljava Extra", icon: "🏹", desc: "+150 Pontos & +15 HP" } }
+        ],
+        portal: { x: 2295, y: 314, w: 68, h: 96 }
+      },
+      {
+        id: 2,
+        name: "Fosso das Brasas",
+        worldWidth: 2850,
+        groundY: 410,
+        platforms: [
+          { x: 270, y: 325, w: 120, h: 18 },
+          { x: 470, y: 255, w: 120, h: 18 },
+          { x: 700, y: 290, w: 140, h: 18 },
+          { x: 960, y: 230, w: 140, h: 18 },
+          { x: 1240, y: 295, w: 150, h: 18 },
+          { x: 1520, y: 230, w: 150, h: 18 },
+          { x: 1820, y: 290, w: 150, h: 18 },
+          { x: 2120, y: 235, w: 160, h: 18 }
+        ],
+        traps: [
+          { type: "lava", x: 410, y: 410, w: 170, h: 40 },
+          { type: "saw", x: 840, y: 394, r: 16, minX: 740, maxX: 930, dir: 1, spin: 0 },
+          { type: "lava", x: 1040, y: 410, w: 180, h: 40 },
+          { type: "spikes", x: 1420, y: 394, w: 84, h: 16 },
+          { type: "lava", x: 1680, y: 410, w: 190, h: 40 },
+          { type: "saw", x: 2020, y: 394, r: 17, minX: 1920, maxX: 2140, dir: -1, spin: 0 }
+        ],
+        enemies: [
+          { type: "skeleton", x: 330, y: 362, minX: 240, maxX: 390, hp: 70 },
+          { type: "bat", x: 520, y: 175, baseY: 175, minX: 420, maxX: 640, hp: 45 },
+          { type: "archer", x: 1020, y: 182, minX: 970, maxX: 1080, hp: 60 },
+          { type: "skeleton", x: 1310, y: 362, minX: 1230, maxX: 1400, hp: 75 },
+          { type: "bat", x: 1600, y: 165, baseY: 165, minX: 1490, maxX: 1740, hp: 45 },
+          { type: "archer", x: 1880, y: 242, minX: 1830, maxX: 1950, hp: 65 },
+          { type: "skeleton", x: 2240, y: 362, minX: 2150, maxX: 2380, hp: 80 }
+        ],
+        chests: [
+          { x: 505, y: 223, cash: 80, item: { id: "potion", name: "Poção Carmesim", icon: "🧪", desc: "Restaura +45 HP" } },
+          { x: 1565, y: 198, cash: 110, item: { id: "elixir", name: "Elixir da Sombra", icon: "⚗️", desc: "Restaura +80 HP" } },
+          { x: 2175, y: 203, cash: 140, item: { id: "relic", name: "Relíquia Ancestral", icon: "🏺", desc: "+400 Pontos" } }
+        ],
+        portal: { x: 2635, y: 314, w: 68, h: 96 }
+      },
+      {
+        id: 3,
+        name: "Cidadela do Dragão",
+        worldWidth: 3200,
+        groundY: 410,
+        platforms: [
+          { x: 260, y: 320, w: 120, h: 18 },
+          { x: 470, y: 245, w: 120, h: 18 },
+          { x: 710, y: 295, w: 130, h: 18 },
+          { x: 960, y: 220, w: 130, h: 18 },
+          { x: 1230, y: 280, w: 140, h: 18 },
+          { x: 1510, y: 215, w: 140, h: 18 },
+          { x: 1800, y: 285, w: 140, h: 18 },
+          { x: 2090, y: 220, w: 140, h: 18 },
+          { x: 2390, y: 275, w: 160, h: 18 }
+        ],
+        traps: [
+          { type: "lava", x: 390, y: 410, w: 180, h: 40 },
+          { type: "spikes", x: 750, y: 394, w: 80, h: 16 },
+          { type: "lava", x: 980, y: 410, w: 190, h: 40 },
+          { type: "saw", x: 1360, y: 394, r: 18, minX: 1250, maxX: 1470, dir: 1, spin: 0 },
+          { type: "lava", x: 1640, y: 410, w: 200, h: 40 },
+          { type: "spikes", x: 2020, y: 394, w: 90, h: 16 },
+          { type: "saw", x: 2320, y: 394, r: 18, minX: 2200, maxX: 2450, dir: -1, spin: 0 }
+        ],
+        enemies: [
+          { type: "skeleton", x: 310, y: 362, minX: 220, maxX: 375, hp: 80 },
+          { type: "archer", x: 515, y: 197, minX: 475, maxX: 575, hp: 70 },
+          { type: "bat", x: 840, y: 170, baseY: 170, minX: 720, maxX: 960, hp: 50 },
+          { type: "skeleton", x: 1210, y: 362, minX: 1180, maxX: 1320, hp: 85 },
+          { type: "archer", x: 1565, y: 167, minX: 1515, maxX: 1635, hp: 75 },
+          { type: "bat", x: 1940, y: 165, baseY: 165, minX: 1810, maxX: 2070, hp: 55 },
+          { type: "skeleton", x: 2150, y: 362, minX: 2115, maxX: 2240, hp: 90 },
+          { type: "archer", x: 2455, y: 227, minX: 2400, maxX: 2530, hp: 80 },
+          { type: "skeleton", x: 2680, y: 362, minX: 2560, maxX: 2820, hp: 95 }
+        ],
+        chests: [
+          { x: 755, y: 263, cash: 120, item: { id: "potion", name: "Poção Carmesim", icon: "🧪", desc: "Restaura +45 HP" } },
+          { x: 1555, y: 183, cash: 150, item: { id: "elixir", name: "Elixir da Sombra", icon: "⚗️", desc: "Restaura +80 HP" } },
+          { x: 2445, y: 243, cash: 200, item: { id: "crown", name: "Coroa do Shogun", icon: "👑", desc: "+600 Pontos" } }
+        ],
+        portal: { x: 2980, y: 314, w: 68, h: 96 }
+      }
+    ];
+
+    const SAVE_KEY = "kage_runner_preview_save_v1";
+    const STAGE_TIME_LIMIT = 180; // 3 minutos por fase
+
+    // ============================================================================
+    // COMPONENTE PRINCIPAL DO JOGO (PRÉVIA JOGÁVEL)
+    // ============================================================================
+    function App() {
+      const [screen, setScreen] = useState("MENU"); // MENU | PLAYING | STAGE_CLEAR | GAME_OVER | VICTORY
+      const [stageIndex, setStageIndex] = useState(0);
+      const [unlockedStage, setUnlockedStage] = useState(0);
+      const [score, setScore] = useState(0);
+      const [cash, setCash] = useState(0);
+      const [lives, setLives] = useState(3);
+      const [hp, setHp] = useState(100);
+      const [timeLeft, setTimeLeft] = useState(STAGE_TIME_LIMIT);
+      const [enemiesAlive, setEnemiesAlive] = useState(0);
+      const [muted, setMuted] = useState(false);
+      const [toast, setToast] = useState("");
+      const [hasSave, setHasSave] = useState(false);
+
+      // Inventário de 10 slots livres (tecla Tab)
+      const [inventory, setInventory] = useState(() => Array(10).fill(null));
+      const [inventoryOpen, setInventoryOpen] = useState(false);
+
+      // Loja ($ moedas coletadas)
+      const [shopOpen, setShopOpen] = useState(false);
+
+      const canvasRef = useRef(null);
+      const gameStateRef = useRef(null);
+      const keysRef = useRef({});
+      const toastTimeoutRef = useRef(null);
+
+      const notify = useCallback((msg) => {
+        setToast(msg);
+        if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current);
+        toastTimeoutRef.current = setTimeout(() => setToast(""), 2600);
+      }, []);
+
+      // Carregar progresso salvo ao iniciar
+      useEffect(() => {
+        try {
+          const raw = localStorage.getItem(SAVE_KEY);
+          if (raw) {
+            const parsed = JSON.parse(raw);
+            if (typeof parsed.stageIndex === "number") {
+              setHasSave(true);
+              setUnlockedStage(parsed.unlockedStage || parsed.stageIndex || 0);
+            }
+          }
+        } catch (e) {}
+      }, []);
+
+      const saveProgress = useCallback((data) => {
+        try {
+          localStorage.setItem(SAVE_KEY, JSON.stringify(data));
+          setHasSave(true);
+        } catch (e) {}
+      }, []);
+
+      const addItemToInventory = useCallback((item) => {
+        if (!item) return;
+        setInventory((prev) => {
+          const next = [...prev];
+          const emptyIdx = next.findIndex((slot) => slot === null);
+          if (emptyIdx !== -1) {
+            next[emptyIdx] = { ...item, uid: Date.now() + Math.random() };
+          }
+          return next;
+        });
+      }, []);
+
+      const useInventoryItem = useCallback(
+        (slotIdx) => {
+          const item = inventory[slotIdx];
+          if (!item) return;
+
+          if (item.id === "potion") {
+            setHp((h) => {
+              const nextHp = Math.min(100, h + 45);
+              if (gameStateRef.current) gameStateRef.current.player.hp = nextHp;
+              return nextHp;
+            });
+            notify("🧪 Poção usada: +45 HP!");
+          } else if (item.id === "elixir") {
+            setHp((h) => {
+              const nextHp = Math.min(100, h + 80);
+              if (gameStateRef.current) gameStateRef.current.player.hp = nextHp;
+              return nextHp;
+            });
+            notify("⚗️ Elixir usado: +80 HP!");
+          } else if (item.id === "gold_scroll") {
+            setScore((s) => s + 250);
+            notify("📜 Pergaminho ativado: +250 pontos!");
+          } else if (item.id === "shuriken_pack") {
+            setScore((s) => s + 150);
+            setHp((h) => {
+              const nextHp = Math.min(100, h + 15);
+              if (gameStateRef.current) gameStateRef.current.player.hp = nextHp;
+              return nextHp;
+            });
+            notify("🏹 Aljava usada: +150 pts & +15 HP!");
+          } else if (item.id === "relic") {
+            setScore((s) => s + 400);
+            notify("🏺 Relíquia ativada: +400 pontos!");
+          } else if (item.id === "crown") {
+            setScore((s) => s + 600);
+            notify("👑 Coroa ativada: +600 pontos!");
+          }
+
+          sound.chestOpen();
+          setInventory((prev) => {
+            const next = [...prev];
+            next[slotIdx] = null;
+            return next;
+          });
+        },
+        [inventory, notify]
+      );
+
+      // Iniciar / Configurar fase
+      const startPlay = useCallback(
+        (idx, keepStats = false, overrideStats = null) => {
+          sound.init();
+          sound.startBgm();
+          const stg = STAGES[idx];
+
+          const startHp = overrideStats?.hp ?? 100;
+          const startLives = overrideStats?.lives ?? (keepStats ? lives : 3);
+          const startScore = overrideStats?.score ?? (keepStats ? score : 0);
+          const startCash = overrideStats?.cash ?? (keepStats ? cash : 0);
+
+          if (!keepStats && !overrideStats) {
+            setScore(0);
+            setCash(0);
+            setLives(3);
+            setInventory(Array(10).fill(null));
+          } else if (overrideStats) {
+            setScore(startScore);
+            setCash(startCash);
+            setLives(startLives);
+            if (Array.isArray(overrideStats.inventory)) {
+              setInventory(overrideStats.inventory);
+            }
+          }
+
+          setHp(startHp);
+          setStageIndex(idx);
+          setTimeLeft(STAGE_TIME_LIMIT);
+          setInventoryOpen(false);
+          setShopOpen(false);
+
+          const clonedEnemies = stg.enemies.map((e, i) => ({
+            ...e,
+            id: i + 1,
+            maxHp: e.hp,
+            vx: e.type === "bat" ? 1.8 : e.type === "skeleton" ? 1.5 : 0.8,
+            dir: i % 2 === 0 ? 1 : -1,
+            shootCooldown: 95 + i * 18,
+            windup: 0,
+            hurtTimer: 0,
+            phase: i * 1.3
+          }));
+
+          const clonedChests = stg.chests.map((c, i) => ({
+            ...c,
+            id: i + 1,
+            opened: false
+          }));
+
+          const clonedTraps = stg.traps.map((t) => ({ ...t }));
+
+          gameStateRef.current = {
+            stage: stg,
+            camX: 0,
+            timeRemaining: STAGE_TIME_LIMIT,
+            lastSecondTick: performance.now(),
+            player: {
+              x: 150,
+              y: stg.groundY - 48,
+              w: 28,
+              h: 48,
+              vx: 0,
+              vy: 0,
+              dir: 1,
+              onGround: false,
+              jumpsLeft: 2,
+              hp: startHp,
+              maxHp: 100,
+              invuln: 0,
+              bowCooldown: 0,
+              shurikenCooldown: 0,
+              bowAnim: 0,
+              sprinting: false
+            },
+            enemies: clonedEnemies,
+            chests: clonedChests,
+            traps: clonedTraps,
+            arrows: [],
+            enemyArrows: [],
+            shurikens: [],
+            particles: [],
+            portal: {
+              ...stg.portal,
+              unlocked: false,
+              opened: false,
+              openAnim: 0
+            }
+          };
+
+          setEnemiesAlive(clonedEnemies.length);
+          setScreen("PLAYING");
+        },
+        [lives, score, cash]
+      );
+
+      const continueSavedRun = useCallback(() => {
+        try {
+          const raw = localStorage.getItem(SAVE_KEY);
+          if (!raw) return;
+          const saved = JSON.parse(raw);
+          const idx = Math.min(STAGES.length - 1, Math.max(0, saved.stageIndex || 0));
+          startPlay(idx, true, {
+            hp: 100,
+            lives: saved.lives || 3,
+            score: saved.score || 0,
+            cash: saved.cash || 0,
+            inventory: saved.inventory || Array(10).fill(null)
+          });
+          notify(`💾 Progresso carregado: Fase ${idx + 1}!`);
+        } catch (e) {
+          startPlay(0, false);
+        }
+      }, [startPlay, notify]);
+
+      // Ações do Jogador
+      const triggerJump = useCallback(() => {
+        const state = gameStateRef.current;
+        if (!state) return;
+        const p = state.player;
+        if (p.jumpsLeft > 0) {
+          p.vy = -12.4;
+          p.jumpsLeft -= 1;
+          p.onGround = false;
+          sound.jump();
+          for (let i = 0; i < 6; i++) {
+            state.particles.push({
+              x: p.x + p.w / 2,
+              y: p.y + p.h,
+              vx: (Math.random() - 0.5) * 4,
+              vy: Math.random() * 2,
+              life: 18,
+              color: "#94a3b8"
+            });
+          }
+        }
+      }, []);
+
+      const triggerBowShot = useCallback(() => {
+        const state = gameStateRef.current;
+        if (!state) return;
+        const p = state.player;
+        if (p.bowCooldown > 0) return;
+
+        p.bowCooldown = 20;
+        p.bowAnim = 12;
+        sound.bowShoot();
+
+        state.arrows.push({
+          x: p.dir === 1 ? p.x + p.w + 4 : p.x - 18,
+          y: p.y + 20,
+          vx: p.dir * 13.5,
+          vy: -0.4,
+          dir: p.dir,
+          life: 85
+        });
+      }, []);
+
+      const triggerShuriken = useCallback(() => {
+        const state = gameStateRef.current;
+        if (!state) return;
+        const p = state.player;
+        if (p.shurikenCooldown > 0) return;
+
+        p.shurikenCooldown = 28;
+        sound.shuriken();
+
+        state.shurikens.push({
+          x: p.dir === 1 ? p.x + p.w : p.x - 12,
+          y: p.y + 22,
+          vx: p.dir * 11,
+          rot: 0,
+          life: 70
+        });
+      }, []);
+
+      // Tecla F: Abrir baús e porta final após derrotar inimigos
+      const triggerInteractF = useCallback(() => {
+        const state = gameStateRef.current;
+        if (!state) return;
+        const p = state.player;
+        const pCenterX = p.x + p.w / 2;
+        const pCenterY = p.y + p.h / 2;
+        const aliveCount = state.enemies.filter((e) => e.hp > 0).length;
+
+        for (const chest of state.chests) {
+          const dist = Math.hypot(pCenterX - (chest.x + 18), pCenterY - (chest.y + 14));
+          if (dist < 68 && !chest.opened) {
+            if (aliveCount > 0) {
+              notify(`🔒 Derrote todos os ${aliveCount} inimigos antes de abrir o baú!`);
+              return;
+            }
+            chest.opened = true;
+            sound.chestOpen();
+            setCash((c) => c + chest.cash);
+            setScore((s) => s + 100);
+            if (chest.item) {
+              addItemToInventory(chest.item);
+              notify(`🧰 Baú aberto: +$${chest.cash} e ${chest.item.icon} ${chest.item.name}!`);
+            } else {
+              notify(`🧰 Baú aberto: +$${chest.cash}!`);
+            }
+            for (let i = 0; i < 16; i++) {
+              state.particles.push({
+                x: chest.x + 18,
+                y: chest.y + 8,
+                vx: (Math.random() - 0.5) * 6,
+                vy: -Math.random() * 6 - 1,
+                life: 32,
+                color: "#facc15"
+              });
+            }
+            return;
+          }
+        }
+
+        const port = state.portal;
+        const portDist = Math.hypot(pCenterX - (port.x + port.w / 2), pCenterY - (port.y + port.h / 2));
+        if (portDist < 95) {
+          if (aliveCount > 0) {
+            notify(`🔒 Elimine os ${aliveCount} inimigos restantes para destrancar a porta!`);
+            return;
+          }
+          if (!port.opened) {
+            port.opened = true;
+            sound.doorUnlock();
+            notify("🚪 Porta aberta! Atravesse para avançar!");
+          }
+        }
+      }, [addItemToInventory, notify]);
+
+      const buyShopItem = (itemType) => {
+        if (itemType === "heal") {
+          if (cash < 60) return notify("💸 Dinheiro insuficiente ($60)!");
+          setCash((c) => c - 60);
+          setHp((h) => {
+            const nextHp = Math.min(100, h + 50);
+            if (gameStateRef.current) gameStateRef.current.player.hp = nextHp;
+            return nextHp;
+          });
+          sound.chestOpen();
+          notify("❤️ +50 HP restaurados!");
+        } else if (itemType === "life") {
+          if (cash < 150) return notify("💸 Dinheiro insuficiente ($150)!");
+          setCash((c) => c - 150);
+          setLives((l) => l + 1);
+          sound.chestOpen();
+          notify("🥷 +1 Vida Extra adquirida!");
+        } else if (itemType === "potion_inv") {
+          if (cash < 50) return notify("💸 Dinheiro insuficiente ($50)!");
+          const hasSlot = inventory.some((s) => s === null);
+          if (!hasSlot) return notify("🎒 Inventário cheio (10/10)!");
+          setCash((c) => c - 50);
+          addItemToInventory({ id: "potion", name: "Poção Carmesim", icon: "🧪", desc: "Restaura +45 HP" });
+          sound.chestOpen();
+          notify("🧪 Poção guardada no inventário!");
+        }
+      };
+
+      // Controles de Teclado
+      useEffect(() => {
+        const handleKeyDown = (e) => {
+          if (["Space", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Tab"].includes(e.code)) {
+            e.preventDefault();
+          }
+
+          if (e.code === "Tab" && screen === "PLAYING") {
+            setInventoryOpen((prev) => !prev);
+            setShopOpen(false);
+            return;
+          }
+
+          keysRef.current[e.code] = true;
+
+          if (screen !== "PLAYING" || inventoryOpen || shopOpen) return;
+
+          if (e.code === "Space" && !e.repeat) {
+            triggerJump();
+          } else if ((e.code === "KeyJ" || e.code === "KeyZ") && !e.repeat) {
+            triggerBowShot();
+          } else if ((e.code === "KeyL" || e.code === "KeyX") && !e.repeat) {
+            triggerShuriken();
+          } else if (e.code === "KeyF" && !e.repeat) {
+            triggerInteractF();
+          }
+        };
+
+        const handleKeyUp = (e) => {
+          keysRef.current[e.code] = false;
+        };
+
+        window.addEventListener("keydown", handleKeyDown, { passive: false });
+        window.addEventListener("keyup", handleKeyUp);
+        return () => {
+          window.removeEventListener("keydown", handleKeyDown);
+          window.removeEventListener("keyup", handleKeyUp);
+        };
+      }, [screen, inventoryOpen, shopOpen, triggerJump, triggerBowShot, triggerShuriken, triggerInteractF]);
+
+      // Loop Principal do Jogo
+      useEffect(() => {
+        if (screen !== "PLAYING") return;
+
+        let animId;
+        const canvas = canvasRef.current;
+        if (!canvas) return;
+        const ctx = canvas.getContext("2d");
+
+        const resizeCanvas = () => {
+          const rect = canvas.parentElement.getBoundingClientRect();
+          canvas.width = Math.max(320, Math.floor(rect.width));
+          canvas.height = Math.max(360, Math.floor(rect.height));
+        };
+        resizeCanvas();
+        window.addEventListener("resize", resizeCanvas);
+
+        const damagePlayer = (amount, knockDir = -1) => {
+          const state = gameStateRef.current;
+          if (!state) return;
+          const p = state.player;
+          if (p.invuln > 0) return;
+
+          p.hp = Math.max(0, p.hp - amount);
+          p.invuln = 55;
+          p.vy = -7;
+          p.vx = knockDir * 6;
+          setHp(p.hp);
+          sound.playerHurt();
+
+          for (let i = 0; i < 12; i++) {
+            state.particles.push({
+              x: p.x + p.w / 2,
+              y: p.y + p.h / 2,
+              vx: (Math.random() - 0.5) * 6,
+              vy: (Math.random() - 0.5) * 6,
+              life: 24,
+              color: "#ef4444"
+            });
+          }
+
+          if (p.hp <= 0) {
+            setLives((prevLives) => {
+              const remaining = prevLives - 1;
+              if (remaining <= 0) {
+                sound.stopBgm();
+                setScreen("GAME_OVER");
+                return 0;
+              } else {
+                p.hp = 100;
+                p.x = 150;
+                p.y = state.stage.groundY - 48;
+                p.vx = 0;
+                p.vy = 0;
+                setHp(100);
+                notify(`💀 Você caiu! Vidas restantes: ${remaining}`);
+                return remaining;
+              }
+            });
+          }
+        };
+
+        const update = (now) => {
+          const state = gameStateRef.current;
+          if (!state) return;
+
+          if (inventoryOpen || shopOpen) {
+            state.lastSecondTick = now;
+            return;
+          }
+
+          const { player: p, stage } = state;
+
+          if (now - state.lastSecondTick >= 1000) {
+            const elapsedSec = Math.floor((now - state.lastSecondTick) / 1000);
+            state.lastSecondTick += elapsedSec * 1000;
+            state.timeRemaining = Math.max(0, state.timeRemaining - elapsedSec);
+            setTimeLeft(state.timeRemaining);
+            if (state.timeRemaining <= 0) {
+              sound.stopBgm();
+              setScreen("GAME_OVER");
+              return;
+            }
+          }
+
+          if (p.invuln > 0) p.invuln--;
+          if (p.bowCooldown > 0) p.bowCooldown--;
+          if (p.shurikenCooldown > 0) p.shurikenCooldown--;
+          if (p.bowAnim > 0) p.bowAnim--;
+
+          const left = keysRef.current["ArrowLeft"] || keysRef.current["KeyA"];
+          const right = keysRef.current["ArrowRight"] || keysRef.current["KeyD"];
+          const shift = keysRef.current["ShiftLeft"] || keysRef.current["ShiftRight"];
+
+          p.sprinting = Boolean(shift && (left || right));
+          const maxSpeed = p.sprinting ? 7.6 : 4.6;
+
+          if (left) {
+            p.vx = -maxSpeed;
+            p.dir = -1;
+          } else if (right) {
+            p.vx = maxSpeed;
+            p.dir = 1;
+          } else {
+            p.vx *= 0.78;
+            if (Math.abs(p.vx) < 0.1) p.vx = 0;
+          }
+
+          if (p.sprinting && Math.random() < 0.45) {
+            state.particles.push({
+              x: p.x + p.w / 2,
+              y: p.y + p.h * 0.65,
+              vx: -p.dir * 2,
+              vy: (Math.random() - 0.5) * 1.2,
+              life: 12,
+              color: "#38bdf8"
+            });
+          }
+
+          const prevY = p.y;
+          p.vy += 0.62;
+          p.x += p.vx;
+          p.y += p.vy;
+
+          p.x = Math.max(136, Math.min(stage.worldWidth - p.w - 20, p.x));
+
+          p.onGround = false;
+          for (const plat of stage.platforms) {
+            if (
+              p.vy >= 0 &&
+              prevY + p.h <= plat.y + 8 &&
+              p.y + p.h >= plat.y &&
+              p.x + p.w > plat.x + 4 &&
+              p.x < plat.x + plat.w - 4
+            ) {
+              p.y = plat.y - p.h;
+              p.vy = 0;
+              p.onGround = true;
+              p.jumpsLeft = 2;
+            }
+          }
+
+          const playerFootLeft = p.x + 6;
+          const playerFootRight = p.x + p.w - 6;
+          const activeLavaPit = state.traps.find(
+            (t) =>
+              t.type === "lava" &&
+              playerFootLeft >= t.x + 4 &&
+              playerFootRight <= t.x + t.w - 4
+          );
+
+          if (!activeLavaPit && p.y + p.h >= stage.groundY) {
+            p.y = stage.groundY - p.h;
+            p.vy = 0;
+            p.onGround = true;
+            p.jumpsLeft = 2;
+          } else if (activeLavaPit && p.y + p.h >= stage.groundY + 12) {
+            damagePlayer(35, -p.dir);
+            p.x = Math.max(140, activeLavaPit.x - p.w - 10);
+            p.y = stage.groundY - p.h - 8;
+            p.vy = -9;
+          }
+
+          for (const tr of state.traps) {
+            if (tr.type === "saw") {
+              tr.x += tr.dir * 2.4;
+              tr.spin += 0.16 * tr.dir;
+              if (tr.x >= tr.maxX) tr.dir = -1;
+              if (tr.x <= tr.minX) tr.dir = 1;
+
+              const dist = Math.hypot(p.x + p.w / 2 - tr.x, p.y + p.h / 2 - tr.y);
+              if (dist < tr.r + 14) {
+                damagePlayer(25, p.x < tr.x ? -1 : 1);
+              }
+            } else if (tr.type === "spikes") {
+              if (
+                p.x + p.w > tr.x + 4 &&
+                p.x < tr.x + tr.w - 4 &&
+                p.y + p.h > tr.y + 2 &&
+                p.y < tr.y + tr.h
+              ) {
+                damagePlayer(20, -p.dir);
+              }
+            }
+          }
+
+          for (let i = state.arrows.length - 1; i >= 0; i--) {
+            const ar = state.arrows[i];
+            ar.x += ar.vx;
+            ar.vy += 0.04;
+            ar.y += ar.vy;
+            ar.life--;
+
+            let hit = false;
+            for (const en of state.enemies) {
+              if (en.hp <= 0) continue;
+              if (ar.x > en.x && ar.x < en.x + 34 && ar.y > en.y && ar.y < en.y + 46) {
+                en.hp -= 25;
+                en.hurtTimer = 10;
+                hit = true;
+                sound.hitEnemy();
+                for (let k = 0; k < 8; k++) {
+                  state.particles.push({
+                    x: ar.x,
+                    y: ar.y,
+                    vx: (Math.random() - 0.5) * 5,
+                    vy: (Math.random() - 0.5) * 5,
+                    life: 18,
+                    color: "#f87171"
+                  });
+                }
+                if (en.hp <= 0) {
+                  setScore((s) => s + (en.type === "archer" ? 150 : 120));
+                  setCash((c) => c + 20);
+                }
+                break;
+              }
+            }
+
+            if (hit || ar.life <= 0) {
+              state.arrows.splice(i, 1);
+            }
+          }
+
+          for (let i = state.shurikens.length - 1; i >= 0; i--) {
+            const sh = state.shurikens[i];
+            sh.x += sh.vx;
+            sh.rot += 0.45;
+            sh.life--;
+
+            let hit = false;
+            for (const en of state.enemies) {
+              if (en.hp <= 0) continue;
+              if (sh.x + 12 > en.x && sh.x < en.x + 34 && sh.y + 12 > en.y && sh.y < en.y + 46) {
+                en.hp -= 20;
+                en.hurtTimer = 10;
+                hit = true;
+                sound.hitEnemy();
+                if (en.hp <= 0) {
+                  setScore((s) => s + 120);
+                  setCash((c) => c + 15);
+                }
+                break;
+              }
+            }
+
+            if (hit || sh.life <= 0) {
+              state.shurikens.splice(i, 1);
+            }
+          }
+
+          let aliveCount = 0;
+          for (const en of state.enemies) {
+            if (en.hp <= 0) continue;
+            aliveCount++;
+            if (en.hurtTimer > 0) en.hurtTimer--;
+
+            const distToPlayer = p.x - en.x;
+            const absDist = Math.abs(distToPlayer);
+
+            if (en.type === "skeleton") {
+              if (absDist < 240 && Math.abs(p.y - en.y) < 90) {
+                en.dir = distToPlayer >= 0 ? 1 : -1;
+                en.x += en.dir * (en.vx * 1.45);
+              } else {
+                en.x += en.dir * en.vx;
+                if (en.x >= en.maxX) en.dir = -1;
+                if (en.x <= en.minX) en.dir = 1;
+              }
+              en.x = Math.max(en.minX - 20, Math.min(en.maxX + 20, en.x));
+            } else if (en.type === "archer") {
+              en.dir = distToPlayer >= 0 ? 1 : -1;
+              if (absDist < 110) {
+                en.x -= en.dir * en.vx;
+                en.x = Math.max(en.minX, Math.min(en.maxX, en.x));
+              }
+              if (absDist < 420) {
+                en.shootCooldown--;
+                if (en.shootCooldown <= 22 && en.shootCooldown > 0) {
+                  en.windup = en.shootCooldown;
+                } else {
+                  en.windup = 0;
+                }
+                if (en.shootCooldown <= 0) {
+                  en.shootCooldown = 125;
+                  state.enemyArrows.push({
+                    x: en.dir === 1 ? en.x + 30 : en.x - 12,
+                    y: en.y + 22,
+                    vx: en.dir * 6.8,
+                    dir: en.dir,
+                    life: 110
+                  });
+                }
+              }
+            } else if (en.type === "bat") {
+              en.phase += 0.08;
+              en.x += en.dir * en.vx;
+              if (en.x >= en.maxX) en.dir = -1;
+              if (en.x <= en.minX) en.dir = 1;
+
+              if (absDist < 190 && p.y > en.y) {
+                en.y += (p.y - en.y) * 0.035;
+              } else {
+                en.y = en.baseY + Math.sin(en.phase) * 24;
+              }
+            }
+
+            if (
+              p.x + p.w > en.x + 4 &&
+              p.x < en.x + 30 &&
+              p.y + p.h > en.y + 4 &&
+              p.y < en.y + 44
+            ) {
+              damagePlayer(18, p.x < en.x ? -1 : 1);
+            }
+          }
+
+          setEnemiesAlive(aliveCount);
+
+          for (let i = state.enemyArrows.length - 1; i >= 0; i--) {
+            const ea = state.enemyArrows[i];
+            ea.x += ea.vx;
+            ea.life--;
+
+            if (
+              ea.x + 12 > p.x &&
+              ea.x < p.x + p.w &&
+              ea.y + 4 > p.y &&
+              ea.y < p.y + p.h
+            ) {
+              damagePlayer(16, ea.dir);
+              state.enemyArrows.splice(i, 1);
+              continue;
+            }
+            if (ea.life <= 0) {
+              state.enemyArrows.splice(i, 1);
+            }
+          }
+
+          for (let i = state.particles.length - 1; i >= 0; i--) {
+            const pt = state.particles[i];
+            pt.x += pt.vx;
+            pt.y += pt.vy;
+            pt.life--;
+            if (pt.life <= 0) state.particles.splice(i, 1);
+          }
+
+          if (aliveCount === 0 && !state.portal.unlocked) {
+            state.portal.unlocked = true;
+            sound.doorUnlock();
+            notify("🔓 Todos os inimigos derrotados! Abra os baús e a porta com [F]!");
+          }
+
+          if (state.portal.opened) {
+            state.portal.openAnim = Math.min(1, state.portal.openAnim + 0.06);
+            const port = state.portal;
+            if (
+              p.x + p.w > port.x + 14 &&
+              p.x < port.x + port.w - 14 &&
+              p.y + p.h > port.y + 10
+            ) {
+              sound.stageClear();
+              const nextStage = stageIndex + 1;
+              const newUnlocked = Math.max(unlockedStage, Math.min(STAGES.length - 1, nextStage));
+              setUnlockedStage(newUnlocked);
+
+              if (nextStage < STAGES.length) {
+                saveProgress({
+                  stageIndex: nextStage,
+                  unlockedStage: newUnlocked,
+                  score,
+                  cash,
+                  lives,
+                  inventory
+                });
+                setScreen("STAGE_CLEAR");
+              } else {
+                saveProgress({
+                  stageIndex: 0,
+                  unlockedStage: STAGES.length - 1,
+                  score,
+                  cash,
+                  lives,
+                  inventory
+                });
+                setScreen("VICTORY");
+              }
+              return;
+            }
+          }
+
+          const targetCam = p.x - canvas.width * 0.35;
+          state.camX += (targetCam - state.camX) * 0.12;
+          state.camX = Math.max(0, Math.min(stage.worldWidth - canvas.width, state.camX));
+        };
+
+        const draw = () => {
+          const state = gameStateRef.current;
+          if (!state) return;
+
+          const viewW = canvas.width;
+          const viewH = canvas.height;
+          const { stage, player: p } = state;
+
+          ctx.imageSmoothingEnabled = false;
+          const skyBands = [
+            "#13091f",
+            "#1c0d29",
+            "#2a1130",
+            "#3d1431",
+            "#58192e",
+            "#7a2229",
+            "#9e3222",
+            "#bd491e"
+          ];
+          const bandH = Math.ceil(stage.groundY / skyBands.length);
+          for (let b = 0; b < skyBands.length; b++) {
+            const by = b * bandH;
+            ctx.fillStyle = skyBands[b];
+            ctx.fillRect(0, by, viewW, bandH);
+            if (b < skyBands.length - 1) {
+              ctx.fillStyle = skyBands[b + 1];
+              for (let dx = (b % 2) * 8; dx < viewW; dx += 16) {
+                ctx.fillRect(dx, by + bandH - 4, 8, 4);
+                ctx.fillRect(dx + 4, by + bandH - 8, 4, 4);
+              }
+            }
+          }
+
+          for (let i = 0; i < 48; i++) {
+            const sx = Math.floor((i * 193 + state.camX * 0.12) % (viewW + 40));
+            const sy = Math.floor(((i * 73) % (stage.groundY * 0.62)) / 4) * 4;
+            ctx.fillStyle = i % 3 === 0 ? "#fde68a" : "#f8fafc";
+            ctx.fillRect(sx, sy, i % 4 === 0 ? 4 : 2, i % 4 === 0 ? 4 : 2);
+          }
+
+          ctx.fillStyle = "#221024";
+          for (let x = -40; x < viewW + 80; x += 24) {
+            const worldSample = x + state.camX * 0.25;
+            const h =
+              115 +
+              Math.floor((Math.sin(worldSample * 0.0045) * 42 + Math.cos(worldSample * 0.009) * 26) / 8) *
+                8;
+            ctx.fillRect(x, stage.groundY - h, 24, h);
+          }
+
+          const castleScreenX = Math.floor(viewW * 0.72 - ((state.camX * 0.14) % 420));
+          const castleBaseY = stage.groundY - 128;
+          ctx.fillStyle = "#160a18";
+          ctx.fillRect(castleScreenX - 18, castleBaseY - 36, 36, 36);
+          ctx.fillRect(castleScreenX - 8, castleBaseY - 64, 16, 28);
+          ctx.fillRect(castleScreenX - 24, castleBaseY - 46, 10, 46);
+          ctx.fillRect(castleScreenX + 14, castleBaseY - 46, 10, 46);
+
+          const beaconR = [26, 18, 10, 4];
+          const beaconColors = [
+            "rgba(251,146,60,0.18)",
+            "rgba(253,186,116,0.28)",
+            "rgba(254,240,138,0.45)",
+            "#fef9c3"
+          ];
+          for (let b = 0; b < beaconR.length; b++) {
+            ctx.fillStyle = beaconColors[b];
+            ctx.beginPath();
+            ctx.arc(castleScreenX, castleBaseY - 72, beaconR[b], 0, Math.PI * 2);
+            ctx.fill();
+          }
+
+          ctx.fillStyle = "#f97316";
+          ctx.fillRect(castleScreenX - 4, castleBaseY, 4, 24);
+          ctx.fillRect(castleScreenX + 2, castleBaseY, 4, 28);
+          ctx.fillStyle = "#facc15";
+          ctx.fillRect(castleScreenX - 8, castleBaseY + 22, 4, 18);
+          ctx.fillRect(castleScreenX + 6, castleBaseY + 24, 4, 16);
+
+          ctx.save();
+          ctx.translate(-Math.floor(state.camX), 0);
+
+          const lavaPits = state.traps.filter((t) => t.type === "lava");
+          const drawGroundSegment = (segStart, segEnd) => {
+            if (segEnd <= segStart) return;
+            const groundHeight = viewH - stage.groundY + 40;
+            ctx.save();
+            ctx.beginPath();
+            ctx.rect(segStart, stage.groundY, segEnd - segStart, groundHeight);
+            ctx.clip();
+
+            for (let gx = Math.floor(segStart / 32) * 32; gx < segEnd; gx += 32) {
+              ctx.fillStyle = "#94a3b8";
+              ctx.fillRect(gx, stage.groundY, 32, 6);
+              ctx.fillStyle = "#64748b";
+              ctx.fillRect(gx, stage.groundY + 6, 32, 4);
+
+              for (let row = 0; row < Math.ceil(groundHeight / 18); row++) {
+                const by = stage.groundY + 10 + row * 18;
+                const offset = (row % 2) * 16;
+                ctx.fillStyle = "#2b2b36";
+                ctx.fillRect(gx, by, 32, 18);
+                ctx.fillStyle = "#181820";
+                ctx.fillRect(gx, by + 15, 32, 3);
+                ctx.fillRect(gx + offset, by, 3, 18);
+                ctx.fillStyle = "#3f3f4e";
+                ctx.fillRect(gx + ((offset + 8) % 24), by + 6, 6, 3);
+              }
+            }
+
+            ctx.fillStyle = "#475569";
+            ctx.fillRect(segStart, stage.groundY, 6, groundHeight);
+            ctx.fillRect(segEnd - 6, stage.groundY, 6, groundHeight);
+            ctx.restore();
+          };
+
+          const sortedLava = [...lavaPits].sort((a, b) => a.x - b.x);
+          let cursorX = 0;
+          for (const lp of sortedLava) {
+            drawGroundSegment(cursorX, lp.x);
+            cursorX = lp.x + lp.w;
+          }
+          drawGroundSegment(cursorX, stage.worldWidth);
+
+          const drawBrickTower = (tx, ty, tw, th) => {
+            ctx.fillStyle = "#2b2b36";
+            ctx.fillRect(tx, ty, tw, th);
+            for (let y = ty; y < ty + th; y += 16) {
+              ctx.fillStyle = "#181820";
+              ctx.fillRect(tx, y + 13, tw, 3);
+              const shift = ((y / 16) % 2) * 18;
+              for (let x = tx + shift; x < tx + tw; x += 36) {
+                ctx.fillRect(x, y, 3, 16);
+              }
+            }
+            for (let cx = tx; cx < tx + tw; cx += 24) {
+              ctx.fillStyle = "#373744";
+              ctx.fillRect(cx, ty - 12, 14, 12);
+            }
+          };
+
+          const drawPixelTorch = (tx, ty) => {
+            const flicker = Math.sin(performance.now() * 0.012 + tx) * 2;
+            const rings = [52, 38, 26, 15];
+            const ringColors = [
+              "rgba(251, 146, 60, 0.10)",
+              "rgba(251, 146, 60, 0.16)",
+              "rgba(253, 186, 116, 0.24)",
+              "rgba(254, 240, 138, 0.35)"
+            ];
+            for (let i = 0; i < rings.length; i++) {
+              ctx.fillStyle = ringColors[i];
+              ctx.beginPath();
+              ctx.arc(tx, ty - 14, rings[i] + flicker, 0, Math.PI * 2);
+              ctx.fill();
+            }
+            ctx.fillStyle = "#18181b";
+            ctx.fillRect(tx - 4, ty - 4, 8, 16);
+            ctx.fillStyle = "#78350f";
+            ctx.fillRect(tx - 2, ty - 8, 4, 14);
+            ctx.fillStyle = "#f97316";
+            ctx.fillRect(tx - 4, ty - 18, 8, 10);
+            ctx.fillStyle = "#facc15";
+            ctx.fillRect(tx - 2, ty - 22 - (flicker > 0 ? 2 : 0), 4, 10);
+          };
+
+          drawBrickTower(0, stage.groundY - 210, 132, 210);
+          ctx.fillStyle = "#09090d";
+          ctx.beginPath();
+          ctx.arc(66, stage.groundY - 56, 34, Math.PI, 0);
+          ctx.lineTo(100, stage.groundY);
+          ctx.lineTo(32, stage.groundY);
+          ctx.closePath();
+          ctx.fill();
+          drawPixelTorch(154, stage.groundY - 54);
+
+          const port = state.portal;
+          drawBrickTower(port.x - 36, stage.groundY - 190, 160, 190);
+          drawPixelTorch(port.x - 16, stage.groundY - 58);
+          drawPixelTorch(port.x + port.w + 16, stage.groundY - 58);
+
+          for (const plat of stage.platforms) {
+            ctx.fillStyle = "#1e1e28";
+            ctx.fillRect(plat.x, plat.y, plat.w, plat.h);
+            ctx.fillStyle = "#67e8f9";
+            ctx.fillRect(plat.x, plat.y, plat.w, 6);
+            ctx.fillStyle = "#06b6d4";
+            ctx.fillRect(plat.x, plat.y + 6, plat.w, 3);
+            for (let dx = plat.x + 6; dx < plat.x + plat.w - 6; dx += 14) {
+              ctx.fillRect(dx, plat.y + 9, 3, 5);
+            }
+            ctx.strokeStyle = "#0f172a";
+            ctx.lineWidth = 2;
+            ctx.strokeRect(plat.x, plat.y, plat.w, plat.h);
+          }
+
+          for (const tr of state.traps) {
+            ctx.save();
+            if (tr.type === "lava") {
+              const pitDepth = viewH - tr.y + 40;
+              ctx.fillStyle = "#c2410c";
+              ctx.fillRect(tr.x, tr.y + 6, tr.w, pitDepth);
+              ctx.fillStyle = "#ea580c";
+              ctx.fillRect(tr.x, tr.y + 10, tr.w, pitDepth * 0.65);
+
+              const waveShift = Math.floor(performance.now() * 0.03);
+              for (let lx = tr.x; lx < tr.x + tr.w; lx += 8) {
+                const wy = Math.sin((lx + waveShift) * 0.18) > 0 ? 0 : 3;
+                ctx.fillStyle = "#fef08a";
+                ctx.fillRect(lx, tr.y + wy, 8, 4);
+                ctx.fillStyle = "#f97316";
+                ctx.fillRect(lx, tr.y + wy + 4, 8, 5);
+              }
+
+              for (let row = 0; row < 6; row++) {
+                const my = tr.y + 22 + row * 16;
+                for (let mx = tr.x + 8 + ((row * 17 + waveShift) % 24); mx < tr.x + tr.w - 14; mx += 34) {
+                  ctx.fillStyle = row % 2 === 0 ? "#fb923c" : "#facc15";
+                  ctx.fillRect(mx, my, 14, 4);
+                }
+              }
+
+              ctx.fillStyle = "#78350f";
+              ctx.fillRect(tr.x - 4, tr.y - 14, tr.w + 8, 4);
+              ctx.strokeStyle = "#a16207";
+              ctx.lineWidth = 2;
+              ctx.beginPath();
+              ctx.moveTo(tr.x, tr.y - 26);
+              ctx.lineTo(tr.x + tr.w, tr.y - 26);
+              ctx.stroke();
+              for (let px = tr.x + 8; px < tr.x + tr.w; px += 28) {
+                ctx.fillStyle = "#92400e";
+                ctx.fillRect(px, tr.y - 28, 3, 14);
+              }
+            } else if (tr.type === "spikes") {
+              const spikeCount = Math.max(3, Math.floor(tr.w / 14));
+              const step = tr.w / spikeCount;
+              for (let i = 0; i < spikeCount; i++) {
+                const sx = Math.floor(tr.x + i * step);
+                ctx.fillStyle = "#cbd5e1";
+                ctx.fillRect(sx + 2, tr.y + 8, step - 4, 8);
+                ctx.fillStyle = "#f8fafc";
+                ctx.fillRect(sx + 4, tr.y + 3, step - 8, 5);
+                ctx.fillStyle = "#ef4444";
+                ctx.fillRect(sx + Math.floor(step / 2) - 1, tr.y, 3, 4);
+              }
+            } else if (tr.type === "saw") {
+              ctx.fillStyle = "#475569";
+              ctx.fillRect(tr.minX, stage.groundY - 4, tr.maxX - tr.minX, 4);
+
+              ctx.translate(tr.x, tr.y);
+              ctx.rotate(tr.spin);
+              ctx.fillStyle = "#e2e8f0";
+              ctx.strokeStyle = "#ef4444";
+              ctx.lineWidth = 2;
+              const teeth = 8;
+              ctx.beginPath();
+              for (let i = 0; i < teeth * 2; i++) {
+                const angle = (i * Math.PI) / teeth;
+                const rad = i % 2 === 0 ? tr.r : tr.r * 0.66;
+                const px = Math.cos(angle) * rad;
+                const py = Math.sin(angle) * rad;
+                if (i === 0) ctx.moveTo(px, py);
+                else ctx.lineTo(px, py);
+              }
+              ctx.closePath();
+              ctx.fill();
+              ctx.stroke();
+
+              ctx.fillStyle = "#991b1b";
+              ctx.fillRect(-4, -4, 8, 8);
+            }
+            ctx.restore();
+          }
+
+          const unlocked = port.unlocked;
+          const portOpened = Boolean(port.opened);
+          const openProgress = port.openAnim || (portOpened ? 1 : 0);
+          const aliveForPortal = state.enemies.filter((e) => e.hp > 0).length;
+          ctx.save();
+
+          if (unlocked) {
+            const glowRings = [72, 54, 38];
+            const glowColors = [
+              "rgba(253, 224, 71, 0.12)",
+              "rgba(254, 240, 138, 0.20)",
+              "rgba(254, 249, 195, 0.30)"
+            ];
+            for (let g = 0; g < glowRings.length; g++) {
+              ctx.fillStyle = glowColors[g];
+              ctx.beginPath();
+              ctx.arc(port.x + port.w / 2, port.y + port.h / 2, glowRings[g], 0, Math.PI * 2);
+              ctx.fill();
+            }
+          }
+
+          ctx.fillStyle = unlocked ? "#eab308" : "#52525b";
+          ctx.beginPath();
+          ctx.arc(port.x + port.w / 2, port.y + port.w / 2, port.w / 2 + 6, Math.PI, 0);
+          ctx.lineTo(port.x + port.w + 6, port.y + port.h);
+          ctx.lineTo(port.x - 6, port.y + port.h);
+          ctx.closePath();
+          ctx.fill();
+
+          const portalInner = ctx.createLinearGradient(port.x, port.y, port.x, port.y + port.h);
+          portalInner.addColorStop(0, "#fef9c3");
+          portalInner.addColorStop(0.5, "#fde047");
+          portalInner.addColorStop(1, "#ffffff");
+          ctx.fillStyle = portalInner;
+          ctx.beginPath();
+          ctx.arc(port.x + port.w / 2, port.y + port.w / 2, port.w / 2, Math.PI, 0);
+          ctx.lineTo(port.x + port.w, port.y + port.h);
+          ctx.lineTo(port.x, port.y + port.h);
+          ctx.closePath();
+          ctx.fill();
+
+          if (openProgress < 0.95) {
+            ctx.save();
+            ctx.beginPath();
+            ctx.arc(port.x + port.w / 2, port.y + port.w / 2, port.w / 2, Math.PI, 0);
+            ctx.lineTo(port.x + port.w, port.y + port.h);
+            ctx.lineTo(port.x, port.y + port.h);
+            ctx.closePath();
+            ctx.clip();
+
+            const halfW = port.w / 2;
+            const leafW = Math.max(2, halfW * (1 - openProgress));
+            ctx.fillStyle = unlocked ? "#713f12" : "#18181b";
+            ctx.fillRect(port.x, port.y, leafW, port.h);
+            ctx.fillRect(port.x + port.w - leafW, port.y, leafW, port.h);
+
+            ctx.fillStyle = unlocked ? "#facc15" : "#52525b";
+            for (let bx = port.x + 8; bx < port.x + port.w; bx += 14) {
+              if (bx < port.x + leafW || bx > port.x + port.w - leafW) {
+                ctx.fillRect(bx, port.y, 3, port.h);
+              }
+            }
+            ctx.restore();
+          }
+
+          const pCenterX = p.x + p.w / 2;
+          const pCenterY = p.y + p.h / 2;
+          const nearPortal =
+            Math.hypot(pCenterX - (port.x + port.w / 2), pCenterY - (port.y + port.h / 2)) < 96;
+
+          ctx.fillStyle = portOpened ? "#bbf7d0" : unlocked ? "#fef08a" : "#fca5a5";
+          ctx.font = "bold 11px Inter, sans-serif";
+          ctx.textAlign = "center";
+          ctx.fillText(
+            portOpened
+              ? "🚪 PORTA ABERTA • ATRAVESSE!"
+              : unlocked
+              ? nearPortal
+                ? "🔓 APERTE [F] PARA ABRIR A PORTA"
+                : "🔓 PORTA LIBERADA • VÁ ATÉ O FIM"
+              : `🔒 PORTA TRANCADA (${aliveForPortal} INIMIGOS)`,
+            port.x + port.w / 2,
+            port.y - 24
+          );
+          ctx.restore();
+
+          for (const chest of state.chests) {
+            ctx.fillStyle = chest.opened ? "#52525b" : "#92400e";
+            ctx.fillRect(chest.x, chest.y + 8, 36, 24);
+            ctx.fillStyle = chest.opened ? "#3f3f46" : "#b45309";
+            ctx.fillRect(chest.x - 2, chest.opened ? chest.y - 2 : chest.y + 2, 40, 10);
+            ctx.fillStyle = "#facc15";
+            ctx.fillRect(chest.x + 15, chest.y + 12, 6, 8);
+
+            const dist = Math.hypot(pCenterX - (chest.x + 18), pCenterY - (chest.y + 14));
+            if (!chest.opened && dist < 76) {
+              ctx.fillStyle = aliveForPortal === 0 ? "#fde047" : "#fca5a5";
+              ctx.font = "bold 11px Inter, sans-serif";
+              ctx.textAlign = "center";
+              ctx.fillText(
+                aliveForPortal === 0 ? "🧰 [F] ABRIR BAÚ" : `🔒 MATE OS ${aliveForPortal} INIMIGOS`,
+                chest.x + 18,
+                chest.y - 10
+              );
+            }
+          }
+
+          for (const en of state.enemies) {
+            if (en.hp <= 0) continue;
+            ctx.save();
+            const flash = en.hurtTimer > 0 && en.hurtTimer % 2 === 0;
+            const walkCycle = Math.sin(performance.now() * 0.015 + en.id * 2) * 3;
+            const bobY = Math.abs(Math.sin(performance.now() * 0.015 + en.id * 2)) * 1.5;
+
+            if (en.type === "skeleton") {
+              const sy = en.y - bobY;
+              ctx.fillStyle = "rgba(0,0,0,0.38)";
+              ctx.fillRect(en.x + 4, en.y + 45, 26, 4);
+
+              ctx.fillStyle = flash ? "#ffffff" : "#991b1b";
+              const capeX = en.dir === 1 ? en.x - 2 : en.x + 14;
+              ctx.fillRect(capeX, sy + 17, 22, 23);
+              ctx.fillStyle = flash ? "#ffffff" : "#7f1d1d";
+              ctx.fillRect(capeX + (en.dir === 1 ? -2 : 4), sy + 36, 6, 5);
+              ctx.fillRect(capeX + 10, sy + 38, 6, 4);
+
+              ctx.fillStyle = flash ? "#ffffff" : "#94a3b8";
+              ctx.fillRect(en.x + 5, sy, 24, 9);
+              ctx.fillStyle = flash ? "#ffffff" : "#cbd5e1";
+              ctx.fillRect(en.x + 14, sy - 2, 6, 11);
+              ctx.fillStyle = "#475569";
+              ctx.fillRect(en.x + 4, sy + 7, 26, 3);
+
+              ctx.fillStyle = flash ? "#ffffff" : "#f5f5f4";
+              ctx.fillRect(en.x + 6, sy + 9, 22, 13);
+              ctx.fillRect(en.x + 10, sy + 21, 14, 4);
+              ctx.fillStyle = "#18181b";
+              const eyeShift = en.dir === 1 ? 2 : 0;
+              ctx.fillRect(en.x + 9 + eyeShift, sy + 13, 5, 5);
+              ctx.fillRect(en.x + 19 + eyeShift, sy + 13, 5, 5);
+              ctx.fillStyle = "#ef4444";
+              ctx.fillRect(en.x + 11 + eyeShift, sy + 15, 2, 2);
+              ctx.fillRect(en.x + 21 + eyeShift, sy + 15, 2, 2);
+
+              ctx.fillStyle = flash ? "#ffffff" : "#e7e5e4";
+              ctx.fillRect(en.x + 15, sy + 25, 4, 12);
+              ctx.fillRect(en.x + 9, sy + 26, 16, 3);
+              ctx.fillRect(en.x + 10, sy + 31, 14, 3);
+              ctx.fillRect(en.x + 10, sy + 36, 14, 4);
+
+              ctx.fillStyle = flash ? "#ffffff" : "#d6d3d1";
+              ctx.fillRect(en.x + 10, en.y + 39 + (walkCycle > 0 ? -2 : 0), 4, 9);
+              ctx.fillRect(en.x + 20, en.y + 39 + (walkCycle < 0 ? -2 : 0), 4, 9);
+
+              const swordX = en.dir === 1 ? en.x + 28 : en.x - 6;
+              ctx.fillStyle = "#cbd5e1";
+              ctx.fillRect(swordX + 3, sy + 14, 4, 16);
+              ctx.fillStyle = "#eab308";
+              ctx.fillRect(swordX, sy + 28, 10, 3);
+            } else if (en.type === "archer") {
+              const ay = en.y - bobY * 0.6;
+              ctx.fillStyle = "rgba(0,0,0,0.38)";
+              ctx.fillRect(en.x + 4, en.y + 45, 26, 4);
+
+              const quiverX = en.dir === 1 ? en.x + 2 : en.x + 25;
+              ctx.fillStyle = "#78350f";
+              ctx.fillRect(quiverX, ay + 15, 7, 17);
+              ctx.fillStyle = "#fde047";
+              ctx.fillRect(quiverX + 1, ay + 11, 2, 5);
+              ctx.fillRect(quiverX + 4, ay + 10, 2, 6);
+
+              ctx.fillStyle = flash ? "#ffffff" : "#f5f5f4";
+              ctx.fillRect(en.x + 7, ay + 8, 20, 14);
+              ctx.fillStyle = flash ? "#ffffff" : "#4d7c0f";
+              ctx.fillRect(en.x + 4, ay + 2, 26, 8);
+              ctx.fillRect(en.dir === 1 ? en.x + 3 : en.x + 25, ay + 8, 6, 13);
+              ctx.fillStyle = flash ? "#ffffff" : "#3f6212";
+              ctx.fillRect(en.x + 6, ay + 21, 22, 5);
+
+              ctx.fillStyle = "#18181b";
+              const eyeShift = en.dir === 1 ? 2 : 0;
+              ctx.fillRect(en.x + 9 + eyeShift, ay + 13, 4, 4);
+              ctx.fillRect(en.x + 19 + eyeShift, ay + 13, 4, 4);
+
+              ctx.fillStyle = flash ? "#ffffff" : "#e7e5e4";
+              ctx.fillRect(en.x + 10, ay + 26, 14, 11);
+              ctx.fillRect(en.x + 10, en.y + 37, 4, 11);
+              ctx.fillRect(en.x + 20, en.y + 37, 4, 11);
+
+              const bowX = en.dir === 1 ? en.x + 29 : en.x + 5;
+              ctx.strokeStyle = en.windup > 0 ? "#facc15" : "#a16207";
+              ctx.lineWidth = 3;
+              ctx.beginPath();
+              ctx.arc(bowX, ay + 24, 12, en.dir === 1 ? -1.35 : 1.8, en.dir === 1 ? 1.35 : 4.5);
+              ctx.stroke();
+
+              ctx.strokeStyle = "#e2e8f0";
+              ctx.lineWidth = 1.5;
+              ctx.beginPath();
+              ctx.moveTo(bowX, ay + 12);
+              ctx.lineTo(bowX - (en.windup > 0 ? en.dir * 4 : 0), ay + 24);
+              ctx.lineTo(bowX, ay + 36);
+              ctx.stroke();
+
+              if (en.windup > 0) {
+                ctx.fillStyle = "#fde047";
+                ctx.fillRect(en.dir === 1 ? bowX - 2 : bowX - 14, ay + 23, 16, 3);
+              }
+            } else if (en.type === "bat") {
+              const flap = Math.sin(performance.now() * 0.028 + en.phase);
+              const wingY = flap * 8;
+              ctx.fillStyle = flash ? "#ffffff" : "#581c87";
+              ctx.fillRect(en.x - 12, en.y + 7 + wingY, 15, 7);
+              ctx.fillRect(en.x - 16, en.y + 9 + wingY * 1.25, 6, 5);
+              ctx.fillRect(en.x + 25, en.y + 7 + wingY, 15, 7);
+              ctx.fillRect(en.x + 38, en.y + 9 + wingY * 1.25, 6, 5);
+
+              ctx.fillStyle = flash ? "#ffffff" : "#3b0764";
+              ctx.fillRect(en.x + 5, en.y + 4, 18, 16);
+              ctx.fillRect(en.x + 6, en.y - 1, 4, 6);
+              ctx.fillRect(en.x + 18, en.y - 1, 4, 6);
+
+              ctx.fillStyle = "#ef4444";
+              ctx.fillRect(en.x + 8, en.y + 9, 4, 4);
+              ctx.fillRect(en.x + 16, en.y + 9, 4, 4);
+              ctx.fillStyle = "#f8fafc";
+              ctx.fillRect(en.x + 10, en.y + 16, 2, 3);
+              ctx.fillRect(en.x + 16, en.y + 16, 2, 3);
+            }
+
+            const hpRatio = Math.max(0, en.hp / en.maxHp);
+            ctx.fillStyle = "#09090b";
+            ctx.fillRect(en.x - 2, en.y - 12, 38, 6);
+            ctx.fillStyle = hpRatio > 0.5 ? "#22c55e" : hpRatio > 0.25 ? "#eab308" : "#ef4444";
+            ctx.fillRect(en.x - 1, en.y - 11, Math.floor(36 * hpRatio), 4);
+            ctx.restore();
+          }
+
+          ctx.save();
+          if (p.invuln === 0 || p.invuln % 4 < 2) {
+            ctx.fillStyle = "#dc2626";
+            const scarfX = p.dir === 1 ? p.x - 8 : p.x + p.w;
+            ctx.fillRect(scarfX, p.y + 12, 10, 6);
+
+            ctx.fillStyle = "#18181b";
+            ctx.fillRect(p.x + 4, p.y + 14, 20, 22);
+            ctx.fillRect(p.x + 4, p.y, 20, 14);
+            ctx.fillStyle = "#ef4444";
+            ctx.fillRect(p.x + 4, p.y + 3, 20, 4);
+            ctx.fillStyle = "#f8fafc";
+            ctx.fillRect(p.dir === 1 ? p.x + 15 : p.x + 7, p.y + 7, 6, 3);
+            ctx.fillStyle = "#27272a";
+            ctx.fillRect(p.x + 6, p.y + 36, 6, 12);
+            ctx.fillRect(p.x + 16, p.y + 36, 6, 12);
+
+            const bowCenterX = p.dir === 1 ? p.x + p.w + 2 : p.x - 2;
+            ctx.strokeStyle = p.bowAnim > 0 ? "#fde047" : "#d97706";
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            ctx.arc(bowCenterX, p.y + 22, 13, p.dir === 1 ? -1.35 : 1.8, p.dir === 1 ? 1.35 : 4.5);
+            ctx.stroke();
+            ctx.strokeStyle = "#e2e8f0";
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            ctx.moveTo(bowCenterX, p.y + 9);
+            ctx.lineTo(bowCenterX, p.y + 35);
+            ctx.stroke();
+          }
+
+          const playerHpRatio = Math.max(0, p.hp / p.maxHp);
+          ctx.fillStyle = "#09090b";
+          ctx.fillRect(p.x - 5, p.y - 12, 38, 6);
+          ctx.fillStyle = playerHpRatio > 0.5 ? "#22c55e" : playerHpRatio > 0.25 ? "#eab308" : "#ef4444";
+          ctx.fillRect(p.x - 4, p.y - 11, Math.floor(36 * playerHpRatio), 4);
+          ctx.restore();
+
+          for (const ar of state.arrows) {
+            ctx.fillStyle = "#fde047";
+            ctx.fillRect(ar.x, ar.y, 18, 3);
+            ctx.fillStyle = "#f8fafc";
+            ctx.fillRect(ar.dir === 1 ? ar.x + 15 : ar.x, ar.y - 1, 4, 5);
+          }
+
+          for (const ea of state.enemyArrows) {
+            ctx.fillStyle = "#f87171";
+            ctx.fillRect(ea.x, ea.y, 16, 3);
+          }
+
+          for (const sh of state.shurikens) {
+            ctx.save();
+            ctx.translate(sh.x + 6, sh.y + 6);
+            ctx.rotate(sh.rot);
+            ctx.fillStyle = "#38bdf8";
+            ctx.fillRect(-7, -2, 14, 4);
+            ctx.fillRect(-2, -7, 4, 14);
+            ctx.restore();
+          }
+
+          for (const pt of state.particles) {
+            ctx.fillStyle = pt.color;
+            ctx.fillRect(pt.x, pt.y, 4, 4);
+          }
+
+          ctx.restore();
+        };
+
+        const loop = (now) => {
+          update(now);
+          draw();
+          animId = requestAnimationFrame(loop);
+        };
+
+        animId = requestAnimationFrame(loop);
+
+        return () => {
+          cancelAnimationFrame(animId);
+          window.removeEventListener("resize", resizeCanvas);
+        };
+      }, [screen, inventoryOpen, shopOpen, stageIndex, unlockedStage, score, cash, lives, inventory, saveProgress, notify]);
+
+      const formatTimer = (sec) => {
+        const m = Math.floor(sec / 60);
+        const s = sec % 60;
+        return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+      };
+
+      return (
+        <div className="min-h-screen bg-zinc-950 text-zinc-100 flex flex-col">
+          {/* BARRA SUPERIOR */}
+          <header className="w-full bg-zinc-900/95 border-b border-red-900/50 px-3 sm:px-6 py-2.5 flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2.5">
+              <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-red-600 to-red-900 flex items-center justify-center font-black text-white shadow-lg shadow-red-950/60">
+                忍
+              </div>
+              <div>
+                <div className="flex items-center gap-2">
+                  <h1 className="font-black tracking-tight text-base sm:text-lg leading-none text-white">
+                    KAGE <span className="text-red-500">RUNNER</span>
+                  </h1>
+                  <span className="px-2 py-0.5 rounded-full bg-amber-500/15 border border-amber-500/40 text-amber-300 text-[10px] font-bold">
+                    PRÉVIA
+                  </span>
+                </div>
+                <p className="text-[11px] text-zinc-400">Pixel Art Ninja Platformer</p>
+              </div>
+            </div>
+
+            {screen === "PLAYING" && (
+              <div className="flex flex-wrap items-center gap-2 sm:gap-3 text-xs sm:text-sm font-bold">
+                <span className="px-2.5 py-1 rounded-lg bg-zinc-800 border border-zinc-700 text-red-400">
+                  ❤️ {hp}% • 🥷 x{lives}
+                </span>
+                <span className="px-2.5 py-1 rounded-lg bg-zinc-800 border border-zinc-700 text-amber-400">
+                  💵 ${cash}
+                </span>
+                <span className="px-2.5 py-1 rounded-lg bg-zinc-800 border border-zinc-700 text-cyan-300">
+                  👾 Inimigos: {enemiesAlive}
+                </span>
+                <span
+                  className={`px-2.5 py-1 rounded-lg border font-mono ${
+                    timeLeft <= 30
+                      ? "bg-red-950 border-red-600 text-red-300 animate-pulse"
+                      : "bg-zinc-800 border-zinc-700 text-zinc-200"
+                  }`}
+                >
+                  ⏱️ {formatTimer(timeLeft)}
+                </span>
+                <button
+                  onClick={() => {
+                    setShopOpen((v) => !v);
+                    setInventoryOpen(false);
+                  }}
+                  className="px-2.5 py-1 rounded-lg bg-amber-600 hover:bg-amber-500 text-zinc-950 font-extrabold transition"
+                >
+                  🛒 Loja
+                </button>
+                <button
+                  onClick={() => {
+                    setInventoryOpen((v) => !v);
+                    setShopOpen(false);
+                  }}
+                  className="px-2.5 py-1 rounded-lg bg-zinc-800 hover:bg-zinc-700 border border-zinc-600 text-zinc-100 transition"
+                >
+                  🎒 Inv [Tab]
+                </button>
+              </div>
+            )}
+
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => {
+                  const next = !muted;
+                  setMuted(next);
+                  sound.muted = next;
+                }}
+                className="px-2.5 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-xs font-semibold"
+              >
+                {muted ? "🔇 Mudo" : "🔊 Som"}
+              </button>
+              {screen !== "MENU" && (
+                <button
+                  onClick={() => {
+                    sound.stopBgm();
+                    setScreen("MENU");
+                  }}
+                  className="px-2.5 py-1.5 rounded-lg bg-red-950 hover:bg-red-900 border border-red-800 text-xs font-bold text-red-200"
+                >
+                  Menu
+                </button>
+              )}
+            </div>
+          </header>
+
+          {/* ÁREA PRINCIPAL */}
+          <main className="flex-1 max-w-6xl w-full mx-auto px-3 py-4 flex flex-col justify-center">
+            {screen === "MENU" && (
+              <div className="relative overflow-hidden rounded-2xl border border-red-900/70 bg-gradient-to-b from-red-950/60 via-zinc-900 to-zinc-950 p-6 sm:p-10 shadow-2xl">
+                <div className="max-w-2xl mx-auto text-center space-y-5">
+                  <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-amber-500/15 border border-amber-500/40 text-amber-300 text-xs font-bold uppercase tracking-wider">
+                    ⚔️ Prévia Jogável • 3 Fases
+                  </div>
+                  <h2 className="text-4xl sm:text-6xl font-black tracking-tight text-white">
+                    KAGE <span className="text-red-500">RUNNER</span>
+                  </h2>
+                  <p className="text-zinc-300 text-sm sm:text-base leading-relaxed">
+                    Teste esta prévia jogável diretamente no navegador: enfrente{" "}
+                    <strong>Esqueletos Guerreiros</strong>, <strong>Esqueletos Arqueiros</strong> e{" "}
+                    <strong>Morcegos</strong>, abra os baús e a porta final com{" "}
+                    <kbd className="px-1.5 py-0.5 bg-zinc-800 rounded border border-zinc-600 text-xs">F</kbd> e
+                    use o inventário ou a loja.
+                  </p>
+
+                  <div className="flex flex-wrap items-center justify-center gap-3 pt-2">
+                    <button
+                      onClick={() => startPlay(0, false)}
+                      className="px-7 py-3.5 rounded-xl bg-gradient-to-r from-red-600 to-red-700 hover:from-red-500 hover:to-red-600 text-white font-black text-base shadow-lg shadow-red-950/80 transition transform active:scale-95"
+                    >
+                      ▶ TESTAR PRÉVIA
+                    </button>
+
+                    {hasSave && (
+                      <button
+                        onClick={continueSavedRun}
+                        className="px-6 py-3.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 border border-amber-500/60 text-amber-300 font-bold text-sm transition"
+                      >
+                        💾 Continuar de Onde Parou
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Seleção de Fases */}
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-4 text-left">
+                    {STAGES.map((st, idx) => {
+                      const locked = idx > unlockedStage;
+                      return (
+                        <button
+                          key={st.id}
+                          disabled={locked}
+                          onClick={() => startPlay(idx, false)}
+                          className={`p-3.5 rounded-xl border transition ${
+                            locked
+                              ? "bg-zinc-900/40 border-zinc-800 text-zinc-600 cursor-not-allowed"
+                              : "bg-zinc-900/90 hover:bg-red-950/30 border-red-900/50 text-zinc-100"
+                          }`}
+                        >
+                          <div className="flex items-center justify-between text-xs font-bold text-red-400 mb-1">
+                            <span>FASE 0{st.id}</span>
+                            <span>{locked ? "🔒" : "⚔️"}</span>
+                          </div>
+                          <div className="font-bold text-sm">{st.name}</div>
+                          <div className="text-[11px] text-zinc-400 mt-1">
+                            {st.enemies.length} inimigos • {st.chests.length} baús
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  {/* Controles */}
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 pt-3 text-xs text-zinc-300 bg-zinc-950/60 p-3.5 rounded-xl border border-zinc-800">
+                    <div>⬅️ ➡️ / A D: Mover</div>
+                    <div>⎵ Espaço: Pulo Duplo</div>
+                    <div>⚡ Shift: Correr Rápido</div>
+                    <div>🏹 J / Z: Arco e Flecha</div>
+                    <div>✳️ L / X: Shuriken</div>
+                    <div>🧰 F: Abrir Baú / Porta • Tab: Inv</div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {screen === "PLAYING" && (
+              <div className="relative w-full h-[460px] sm:h-[520px] rounded-2xl overflow-hidden border-2 border-red-900/60 bg-zinc-950 shadow-2xl">
+                <canvas ref={canvasRef} />
+
+                {toast && (
+                  <div className="absolute top-3 left-1/2 -translate-x-1/2 z-20 px-4 py-2 rounded-xl bg-zinc-950/95 border border-amber-500/70 text-amber-200 text-xs sm:text-sm font-bold shadow-xl text-center">
+                    {toast}
+                  </div>
+                )}
+
+                {inventoryOpen && (
+                  <div className="absolute inset-0 z-30 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
+                    <div className="w-full max-w-md rounded-2xl bg-zinc-900 border border-zinc-700 p-5 space-y-4 shadow-2xl">
+                      <div className="flex items-center justify-between">
+                        <h3 className="font-black text-base text-white">🎒 Inventário Ninja (10 Slots)</h3>
+                        <button
+                          onClick={() => setInventoryOpen(false)}
+                          className="px-2.5 py-1 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-xs font-bold"
+                        >
+                          Fechar [Tab]
+                        </button>
+                      </div>
+                      <p className="text-xs text-zinc-400">
+                        Clique em um item guardado para usá-lo imediatamente.
+                      </p>
+                      <div className="grid grid-cols-5 gap-2.5">
+                        {inventory.map((slot, idx) => (
+                          <button
+                            key={idx}
+                            onClick={() => useInventoryItem(idx)}
+                            disabled={!slot}
+                            title={slot ? `${slot.name}: ${slot.desc}` : `Slot ${idx + 1} vazio`}
+                            className={`h-16 rounded-xl border flex flex-col items-center justify-center p-1 transition ${
+                              slot
+                                ? "bg-zinc-800 hover:bg-red-950/50 border-amber-500/60 text-white"
+                                : "bg-zinc-950/70 border-zinc-800 text-zinc-600"
+                            }`}
+                          >
+                            {slot ? (
+                              <>
+                                <span className="text-xl">{slot.icon}</span>
+                                <span className="text-[9px] truncate w-full text-center mt-0.5 text-zinc-300">
+                                  {slot.name}
+                                </span>
+                              </>
+                            ) : (
+                              <span className="text-[10px] font-mono">#{idx + 1}</span>
+                            )}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {shopOpen && (
+                  <div className="absolute inset-0 z-30 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
+                    <div className="w-full max-w-md rounded-2xl bg-zinc-900 border border-amber-700/60 p-5 space-y-4 shadow-2xl">
+                      <div className="flex items-center justify-between">
+                        <h3 className="font-black text-base text-amber-300">
+                          🛒 Loja do Mercador • Saldo: ${cash}
+                        </h3>
+                        <button
+                          onClick={() => setShopOpen(false)}
+                          className="px-2.5 py-1 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-xs font-bold"
+                        >
+                          Voltar
+                        </button>
+                      </div>
+                      <div className="space-y-2.5 text-sm">
+                        <div className="p-3 rounded-xl bg-zinc-950 border border-zinc-800 flex items-center justify-between">
+                          <div>
+                            <div className="font-bold text-white">❤️ Cura Imediata (+50 HP)</div>
+                            <div className="text-xs text-zinc-400">Recupera sua energia na hora</div>
+                          </div>
+                          <button
+                            onClick={() => buyShopItem("heal")}
+                            className="px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-zinc-950 font-black text-xs"
+                          >
+                            $60
+                          </button>
+                        </div>
+
+                        <div className="p-3 rounded-xl bg-zinc-950 border border-zinc-800 flex items-center justify-between">
+                          <div>
+                            <div className="font-bold text-white">🧪 Poção Carmesim (Inventário)</div>
+                            <div className="text-xs text-zinc-400">Guarda no inventário para usar depois</div>
+                          </div>
+                          <button
+                            onClick={() => buyShopItem("potion_inv")}
+                            className="px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-zinc-950 font-black text-xs"
+                          >
+                            $50
+                          </button>
+                        </div>
+
+                        <div className="p-3 rounded-xl bg-zinc-950 border border-zinc-800 flex items-center justify-between">
+                          <div>
+                            <div className="font-bold text-white">🥷 +1 Vida Extra</div>
+                            <div className="text-xs text-zinc-400">Aumenta suas vidas totais</div>
+                          </div>
+                          <button
+                            onClick={() => buyShopItem("life")}
+                            className="px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-zinc-950 font-black text-xs"
+                          >
+                            $150
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {screen === "PLAYING" && (
+              <div className="mt-3 flex flex-wrap items-center justify-between gap-2 bg-zinc-900/90 border border-zinc-800 p-2.5 rounded-2xl">
+                <div className="flex items-center gap-2">
+                  <button
+                    onPointerDown={() => (keysRef.current["ArrowLeft"] = true)}
+                    onPointerUp={() => (keysRef.current["ArrowLeft"] = false)}
+                    onPointerLeave={() => (keysRef.current["ArrowLeft"] = false)}
+                    className="w-12 h-11 rounded-xl bg-zinc-800 active:bg-red-700 font-black text-lg"
+                  >
+                    ◀
+                  </button>
+                  <button
+                    onPointerDown={() => (keysRef.current["ArrowRight"] = true)}
+                    onPointerUp={() => (keysRef.current["ArrowRight"] = false)}
+                    onPointerLeave={() => (keysRef.current["ArrowRight"] = false)}
+                    className="w-12 h-11 rounded-xl bg-zinc-800 active:bg-red-700 font-black text-lg"
+                  >
+                    ▶
+                  </button>
+                  <button
+                    onPointerDown={() => (keysRef.current["ShiftLeft"] = true)}
+                    onPointerUp={() => (keysRef.current["ShiftLeft"] = false)}
+                    onPointerLeave={() => (keysRef.current["ShiftLeft"] = false)}
+                    className="px-3 h-11 rounded-xl bg-zinc-800 active:bg-sky-600 text-xs font-bold"
+                  >
+                    ⚡ Shift
+                  </button>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={triggerInteractF}
+                    className="px-3 h-11 rounded-xl bg-amber-600 active:bg-amber-500 text-zinc-950 font-black text-xs"
+                  >
+                    🧰 [F] Abrir
+                  </button>
+                  <button
+                    onClick={triggerBowShot}
+                    className="px-3 h-11 rounded-xl bg-red-600 active:bg-red-500 text-white font-black text-xs"
+                  >
+                    🏹 Arco [J]
+                  </button>
+                  <button
+                    onClick={triggerShuriken}
+                    className="px-3 h-11 rounded-xl bg-sky-600 active:bg-sky-500 text-white font-black text-xs"
+                  >
+                    ✳️ [L]
+                  </button>
+                  <button
+                    onClick={triggerJump}
+                    className="px-4 h-11 rounded-xl bg-zinc-700 active:bg-zinc-600 text-white font-black text-xs"
+                  >
+                    ⎵ Pular
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {(screen === "STAGE_CLEAR" || screen === "GAME_OVER" || screen === "VICTORY") && (
+              <div className="max-w-lg mx-auto w-full rounded-2xl bg-zinc-900 border border-red-900/70 p-6 sm:p-8 text-center space-y-4 shadow-2xl">
+                <div className="text-4xl">
+                  {screen === "STAGE_CLEAR" ? "⛩️" : screen === "VICTORY" ? "👑" : "💀"}
+                </div>
+                <h2 className="text-2xl sm:text-3xl font-black text-white">
+                  {screen === "STAGE_CLEAR"
+                    ? `Fase ${stageIndex + 1} Concluída!`
+                    : screen === "VICTORY"
+                    ? "Você Conquistou a Cidadela!"
+                    : "Fim de Jogo"}
+                </h2>
+                <p className="text-sm text-zinc-300">
+                  Pontuação: <strong className="text-amber-400">{score}</strong> • Dinheiro:{" "}
+                  <strong className="text-emerald-400">${cash}</strong>
+                </p>
+
+                <div className="flex flex-wrap items-center justify-center gap-3 pt-2">
+                  {screen === "STAGE_CLEAR" && (
+                    <button
+                      onClick={() => startPlay(stageIndex + 1, true)}
+                      className="px-6 py-3 rounded-xl bg-red-600 hover:bg-red-500 text-white font-black text-sm"
+                    >
+                      Próxima Fase ➔
+                    </button>
+                  )}
+                  <button
+                    onClick={() => startPlay(screen === "GAME_OVER" ? stageIndex : 0, false)}
+                    className="px-6 py-3 rounded-xl bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 text-white font-bold text-sm"
+                  >
+                    {screen === "GAME_OVER" ? "Tentar Fase Novamente" : "Jogar do Início"}
+                  </button>
+                </div>
+              </div>
+            )}
+          </main>
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById("root"));
+    root.render(<App />);
+  </script>
+</body>
+</html>
